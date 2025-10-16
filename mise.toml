@@ -1,3 +1,7 @@
 [tools]
+direnv = "2.37.1"
 go = "1.25.2"
 operator-sdk = "1.41.1"
+
+[tasks.debug]
+run = 'go run cmd/cloudflare/main.go'
