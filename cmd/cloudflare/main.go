@@ -13,15 +13,32 @@ import (
 	"github.com/cloudflare/cloudflare-go/v6/zero_trust"
 )
 
-const (
-	ACCOUNT_ID = "8a9c08698370c234cf710f9f19b8ded1"
-	ZONE_ID = "359ac5178328172d440d922194e4c643"
-	MY_BASE_DOMAIN = "pollenjp.com"
-	MY_EMAIL = "polleninjp@gmail.com"
+var (
+	ACCOUNT_ID     string
+	ZONE_ID        string
+	MY_BASE_DOMAIN string
+	MY_EMAIL       string
 )
 
 func main() {
 	ctx := context.Background()
+
+	ACCOUNT_ID, ok := os.LookupEnv("CLOUDFLARE_ACCOUNT_ID")
+	if !ok {
+		log.Fatal("CLOUDFLARE_ACCOUNT_ID is not set")
+	}
+	// ZONE_ID, ok := os.LookupEnv("CLOUDFLARE_ZONE_ID")
+	// if !ok {
+	// 	log.Fatal("CLOUDFLARE_ZONE_ID is not set")
+	// }
+	MY_BASE_DOMAIN, ok := os.LookupEnv("MY_BASE_DOMAIN")
+	if !ok {
+		log.Fatal("MY_BASE_DOMAIN is not set")
+	}
+	MY_EMAIL, ok := os.LookupEnv("MY_EMAIL")
+	if !ok {
+		log.Fatal("MY_EMAIL is not set")
+	}
 
 	log.Println("start")
 
@@ -46,7 +63,8 @@ func main() {
 		ctx,
 		zero_trust.TunnelCloudflaredListParams{
 			AccountID: cloudflare.F(ACCOUNT_ID),
-			Name: cloudflare.F(zeroTrustTunnelName),
+			Name:      cloudflare.F(zeroTrustTunnelName),
+			IsDeleted: cloudflare.F(false),
 		},
 	)
 	if err != nil {
@@ -59,22 +77,25 @@ func main() {
 		if tunnel.Name == zeroTrustTunnelName {
 			zeroTrustTunnelId = tunnel.ID
 			log.Println("zero trust tunnel already exists")
+
+			// start
+			// {
+			// 	delRes, err := client.ZeroTrust.Tunnels.Cloudflared.Delete(
+			// 		ctx,
+			// 		tunnel.ID,
+			// 		zero_trust.TunnelCloudflaredDeleteParams{
+			// 			AccountID: cloudflare.F(ACCOUNT_ID),
+			// 		},
+			// 	)
+			// 	if err != nil {
+			// 		log.Fatal(err)
+			// 	}
+			// 	log.Println("succeeded to delete unhealthy tunnel, deleted at: ", delRes.DeletedAt)
+			// }
+			// end
+
 			continue
 		}
-		// if !isHealthy {
-		// 	// delete
-		// 	delRes, err := client.ZeroTrust.Tunnels.Cloudflared.Delete(
-		// 		ctx,
-		// 		tunnel.ID,
-		// 		zero_trust.TunnelCloudflaredDeleteParams{
-		// 			AccountID: cloudflare.F(ACCOUNT_ID),
-		// 		},
-		// 	)
-		// 	if err != nil {
-		// 		log.Fatal(err)
-		// 	}
-		// 	log.Println("succeeded to delete unhealthy tunnel, deleted at: ", delRes.DeletedAt)
-		// }
 	}
 
 	if zeroTrustTunnelId == "" {
@@ -86,9 +107,9 @@ func main() {
 		newTunnel, err := client.ZeroTrust.Tunnels.Cloudflared.New(
 			ctx,
 			zero_trust.TunnelCloudflaredNewParams{
-				AccountID: cloudflare.F(ACCOUNT_ID),
-				Name: cloudflare.F(zeroTrustTunnelName),
-				ConfigSrc: cloudflare.F(zero_trust.TunnelCloudflaredNewParamsConfigSrcLocal),
+				AccountID:    cloudflare.F(ACCOUNT_ID),
+				Name:         cloudflare.F(zeroTrustTunnelName),
+				ConfigSrc:    cloudflare.F(zero_trust.TunnelCloudflaredNewParamsConfigSrcLocal),
 				TunnelSecret: cloudflare.F(base64.StdEncoding.EncodeToString([]byte(tunnelSecret))),
 			},
 		)
@@ -156,8 +177,8 @@ func main() {
 			ctx,
 			zero_trust.AccessPolicyNewParams{
 				AccountID: cloudflare.F(ACCOUNT_ID),
-				Name: cloudflare.F(policyName),
-				Decision: cloudflare.F(zero_trust.DecisionAllow),
+				Name:      cloudflare.F(policyName),
+				Decision:  cloudflare.F(zero_trust.DecisionAllow),
 				Include: cloudflare.F([]zero_trust.AccessRuleUnionParam{
 					zero_trust.EmailRuleParam{
 						Email: cloudflare.F(zero_trust.EmailRuleEmailParam{
@@ -185,7 +206,7 @@ func main() {
 		ctx,
 		zero_trust.AccessApplicationListParams{
 			AccountID: cloudflare.F(ACCOUNT_ID),
-			Name: cloudflare.F(zeroTrustAppName),
+			Name:      cloudflare.F(zeroTrustAppName),
 		},
 	)
 	if err != nil {
@@ -210,19 +231,19 @@ func main() {
 			zero_trust.AccessApplicationNewParams{
 				AccountID: cloudflare.F(ACCOUNT_ID),
 				Body: zero_trust.AccessApplicationNewParamsBodySelfHostedApplication{
-					Name: cloudflare.F(zeroTrustAppName),
-					Domain: cloudflare.F(domain),
+					Name:                    cloudflare.F(zeroTrustAppName),
+					Domain:                  cloudflare.F(domain),
 					HTTPOnlyCookieAttribute: cloudflare.F(true),
-					Type: cloudflare.F(zero_trust.ApplicationTypeSelfHosted),
+					Type:                    cloudflare.F(zero_trust.ApplicationTypeSelfHosted),
 					Destinations: cloudflare.F([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationUnion{
 						zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationsPublicDestination{
 							Type: cloudflare.F(zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationsPublicDestinationTypePublic),
-							URI: cloudflare.F(domain),
+							URI:  cloudflare.F(domain),
 						},
 					}),
 					Policies: cloudflare.F([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPolicyUnion{
 						zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
-							ID: cloudflare.F(policyId),
+							ID:         cloudflare.F(policyId),
 							Precedence: cloudflare.F(int64(20)),
 						},
 					}),

@@ -32,10 +32,29 @@ type CloudflareTunnelSpec struct {
 	Foo string `json:"foo,omitempty"`
 }
 
+type CloudflareTunnelStatusTunnel struct {
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	ID string `json:"id"`
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	Name string `json:"name"`
+	// Cloudflare Tunnel token encoded in base64
+	// that decoded format is `{"a": 'xxxx', "t": 'yyyy', "s": 'zzzz'}` json string
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	Token string `json:"token"`
+}
+
 // CloudflareTunnelStatus defines the observed state of CloudflareTunnel.
 type CloudflareTunnelStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// Tunnel Information
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	Tunnel *CloudflareTunnelStatusTunnel `json:"tunnel,omitempty"`
+
+	// Conditions store the status conditions of the CloudflareTunnel instances
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 // +kubebuilder:object:root=true
