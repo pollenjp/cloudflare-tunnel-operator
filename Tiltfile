@@ -32,7 +32,7 @@ local_resource(
 
 # Deploy manager
 watch_file('./config/')
-k8s_yaml(kustomize('./config/dev'))
+k8s_yaml(kustomize('./config/dev-tilt'))
 
 local_resource(
     'Watch & Compile',

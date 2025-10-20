@@ -38,7 +38,7 @@ depends = ["up:k8s"]
 depends = ["test:*"]
 
 [tasks."test:e2e"]
-run = 'make test-e2e'
+run = 'make cleanup-test-e2e && make test-e2e'
 
 [tasks."test:local"]
 run = 'make test'

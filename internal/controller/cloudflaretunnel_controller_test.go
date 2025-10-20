@@ -18,17 +18,73 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	cloudflaretunnelv1alpha1 "github.com/pollenjp/cloudflare-tunnel-operator/api/v1alpha1"
+	"github.com/pollenjp/cloudflare-tunnel-operator/pkg/cf"
 )
+
+// MockTunnelClient is a mock implementation of TunnelClientInterface for testing
+type MockTunnelClient struct {
+	tunnels      map[string]*cf.Tunnel
+	tunnelTokens map[string]string
+}
+
+func NewMockTunnelClient() *MockTunnelClient {
+	return &MockTunnelClient{
+		tunnels:      make(map[string]*cf.Tunnel),
+		tunnelTokens: make(map[string]string),
+	}
+}
+
+func (m *MockTunnelClient) NewTunnel(ctx context.Context, params cf.TunnelNewParams) (*cf.Tunnel, error) {
+	// Check if tunnel with the same name already exists
+	for _, tunnel := range m.tunnels {
+		if tunnel.Name == params.Name {
+			return nil, errors.New("tunnel already exists with name: " + params.Name)
+		}
+	}
+
+	tunnelID := "tunnel-" + params.Name + "-id"
+	tunnel := &cf.Tunnel{
+		ID:   tunnelID,
+		Name: params.Name,
+	}
+	m.tunnels[tunnelID] = tunnel
+	m.tunnelTokens[tunnelID] = "token-" + tunnelID
+	return tunnel, nil
+}
+
+func (m *MockTunnelClient) FindTunnel(ctx context.Context, params cf.FindTunnelParams) (*cf.Tunnel, error) {
+	for _, tunnel := range m.tunnels {
+		if tunnel.Name == params.Name {
+			return tunnel, nil
+		}
+	}
+	return nil, cf.ErrFindTunnelNotFound
+}
+
+func (m *MockTunnelClient) DeleteTunnel(ctx context.Context, params cf.DeleteTunnelParams) error {
+	delete(m.tunnels, params.TunnelID)
+	delete(m.tunnelTokens, params.TunnelID)
+	return nil
+}
+
+func (m *MockTunnelClient) GetTunnelToken(ctx context.Context, params cf.GetTunnelTokenParams) (*string, error) {
+	token, ok := m.tunnelTokens[params.TunnelID]
+	if !ok {
+		return nil, errors.New("tunnel not found: " + params.TunnelID)
+	}
+	return &token, nil
+}
 
 var _ = Describe("CloudflareTunnel Controller", func() {
 	Context("When reconciling a resource", func() {
@@ -45,7 +101,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind CloudflareTunnel")
 			err := k8sClient.Get(ctx, typeNamespacedName, cloudflaretunnel)
-			if err != nil && errors.IsNotFound(err) {
+			if err != nil && apierrors.IsNotFound(err) {
 				resource := &cloudflaretunnelv1alpha1.CloudflareTunnel{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
@@ -68,17 +124,28 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
+			mockTunnelClient := NewMockTunnelClient()
 			controllerReconciler := &CloudflareTunnelReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				TunnelClient: mockTunnelClient,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			// Verify that the tunnel was created
+			updatedResource := &cloudflaretunnelv1alpha1.CloudflareTunnel{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updatedResource)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify that the tunnel status was set
+			Expect(updatedResource.Status.Tunnel).NotTo(BeNil())
+			Expect(updatedResource.Status.Tunnel.ID).To(Equal("tunnel-" + resourceName + "-id"))
+			Expect(updatedResource.Status.Tunnel.Name).To(Equal(resourceName))
+			Expect(updatedResource.Status.Tunnel.Token).To(Equal("token-tunnel-" + resourceName + "-id"))
 		})
 	})
 })

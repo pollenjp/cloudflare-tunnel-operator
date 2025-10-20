@@ -17,11 +17,21 @@ type Tunnel struct {
 	Name string
 }
 
+// TunnelClientInterface defines the interface for Cloudflare Tunnel operations
+type TunnelClientInterface interface {
+	NewTunnel(ctx context.Context, params TunnelNewParams) (*Tunnel, error)
+	FindTunnel(ctx context.Context, params FindTunnelParams) (*Tunnel, error)
+	DeleteTunnel(ctx context.Context, params DeleteTunnelParams) error
+	GetTunnelToken(ctx context.Context, params GetTunnelTokenParams) (*string, error)
+}
+
 func NewTunnel(id string, name string) *Tunnel {
 	return &Tunnel{ID: id, Name: name}
 }
 
 type TunnelClient struct {
+	TunnelClientInterface
+
 	client    *cloudflare.Client
 	AccountID string
 	// This prefix is automatically prepended to the tunnel name

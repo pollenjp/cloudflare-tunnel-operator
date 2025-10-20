@@ -61,7 +61,7 @@ var (
 type CloudflareTunnelReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
-	TunnelClient *cf.TunnelClient
+	TunnelClient cf.TunnelClientInterface
 }
 
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels,verbs=get;list;watch;create;update;patch;delete
@@ -301,15 +301,10 @@ func (r *CloudflareTunnelReconciler) getExistingTunnel(ctx context.Context, cftu
 	})
 	if err != nil {
 		if errors.Is(err, cf.ErrFindTunnelNotFound) {
-			log.Info("tunnel specified in status does not exist", "name", cftunnel.Name)
-
-			// * remove status
-			if err := r.deleteTunnelStatus(ctx, cftunnel); err != nil {
-				return nil, err
-			}
-			return nil, ErrReconcileRequeue
+			log.Info("tunnel does not found", "name", cftunnel.Name)
+			return nil, ErrGetExistingTunnelNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("finding a tunnel: %w", err)
 	}
 	if cftunnel.Status.Tunnel != nil && cftunnel.Status.Tunnel.ID != tunnel.ID {
 		// Same name but different ID -> tunnel has been recreated
@@ -320,8 +315,9 @@ func (r *CloudflareTunnelReconciler) getExistingTunnel(ctx context.Context, cftu
 			"newTunnelID", tunnel.ID,
 		)
 		if err := r.deleteTunnelStatus(ctx, cftunnel); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("deleting tunnel status: %w", err)
 		}
+		// requeue the reconciliation after clearing the tunnel status
 		return nil, ErrReconcileRequeue
 	}
 
