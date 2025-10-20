@@ -4,8 +4,13 @@ namespace: cloudflare-tunnel-operator-system
 resources:
 - ../dev
 patches: []
+configMapGenerator:
+- name: cloudflare-tunnel-operator-config-dev
+  behavior: replace
+  envs:
+  - .env # actual config file (not commit)
 secretGenerator:
 - name: cloudflare-tunnel-operator-secret-dev
   behavior: replace
   envs:
-  - .env # actual secret file (not commit)
+  - .env.secret # actual secret file (not commit)

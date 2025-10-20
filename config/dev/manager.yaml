@@ -9,5 +9,7 @@ spec:
       containers:
       - name: manager
         envFrom:
+        - configMapRef:
+            name: cloudflare-tunnel-operator-config-dev
         - secretRef:
             name: cloudflare-tunnel-operator-secret-dev

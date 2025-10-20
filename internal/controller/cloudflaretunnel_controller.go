@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,7 +46,8 @@ import (
 )
 
 const (
-	cftunnelFinalizer = "cloudflare-tunnel.pollenjp.com/finalizer"
+	cftunnelFinalizer         = "cloudflare-tunnel.pollenjp.com/finalizer"
+	reconcilePeriodicInterval = 1 * time.Minute
 )
 
 const (
@@ -60,13 +63,16 @@ var (
 // CloudflareTunnelReconciler reconciles a CloudflareTunnel object
 type CloudflareTunnelReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	TunnelClient cf.TunnelClientInterface
+	Scheme              *runtime.Scheme
+	Recorder            record.EventRecorder
+	TunnelClient        cf.TunnelClientInterface
+	TunnelReclaimPolicy ReclaimPolicy
 }
 
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -145,25 +151,22 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// indicated by the deletion timestamp being set.
 	if !cftunnel.GetDeletionTimestamp().IsZero() {
 		if controllerutil.ContainsFinalizer(cftunnel, cftunnelFinalizer) {
-			log.Info("Performing Finalizer Operations for CloudflareTunnel before delete CR")
+			log.Info("Performing finalizer operations for CloudflareTunnel before deleting the custom resource")
 
 			// Perform all operations required before removing the finalizer and allow
 			// the Kubernetes API to remove the custom resource.
 			//
 			if err := r.doFinalizerOperationsForCloudflareTunnel(ctx, cftunnel); err != nil {
 				log.Error(err, "Failed to perform finalizer operations for CloudflareTunnel")
-				return ctrl.Result{}, err
+				return ctrl.Result{}, fmt.Errorf("finalizing the CloudflareTunnel custom resource: %w", err)
 			}
+			log.Info("Successfully performed finalizer operations for CloudflareTunnel")
 
 			// Re-fetch the Custom Resource before updating the status
-			// so that we have the latest state of the resource on the cluster and we will avoid
-			// raising the error "the object has been modified, please apply
-			// your changes to the latest version and try again" which would re-trigger the reconciliation
 			if err := r.Get(ctx, req.NamespacedName, cftunnel); err != nil {
 				log.Error(err, "Failed to re-fetch CloudflareTunnel")
 				return ctrl.Result{}, err
 			}
-
 			meta.SetStatusCondition(
 				&cftunnel.Status.Conditions,
 				metav1.Condition{
@@ -173,23 +176,29 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					Message: fmt.Sprintf("Finalizer operations for custom resource %s were successfully accomplished", cftunnel.Name),
 				},
 			)
-
 			if err := r.Status().Update(ctx, cftunnel); err != nil {
 				log.Error(err, "Failed to update CloudflareTunnel status")
 				return ctrl.Result{}, err
 			}
 
 			log.Info("Removing Finalizer for CloudflareTunnel after successfully perform the operations")
+
+			// Re-fetch the Custom Resource before updating the status
+			if err := r.Get(ctx, req.NamespacedName, cftunnel); err != nil {
+				log.Error(err, "Failed to re-fetch CloudflareTunnel")
+				return ctrl.Result{}, err
+			}
 			if ok := controllerutil.RemoveFinalizer(cftunnel, cftunnelFinalizer); !ok {
 				err = fmt.Errorf("finalizer for CloudflareTunnel was not removed")
 				log.Error(err, "Failed to remove finalizer for CloudflareTunnel")
 				return ctrl.Result{}, err
 			}
-
 			if err := r.Update(ctx, cftunnel); err != nil {
 				log.Error(err, "Failed to remove finalizer for CloudflareTunnel")
 				return ctrl.Result{}, err
 			}
+
+			log.Info("Successfully removed finalizer for CloudflareTunnel")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -215,7 +224,7 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// TODO: reconcile deployment for the cloudflared agent
 
-	return ctrl.Result{RequeueAfter: time.Minute}, nil
+	return ctrl.Result{RequeueAfter: reconcilePeriodicInterval}, nil
 }
 
 func (r *CloudflareTunnelReconciler) reconcileTunnel(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
@@ -239,6 +248,8 @@ func (r *CloudflareTunnelReconciler) reconcileTunnel(ctx context.Context, req ct
 			if err := r.Status().Update(ctx, cftunnel); err != nil {
 				return fmt.Errorf("updating 'CloudflareTunnel' custom resource 'Status.Tunnel': %w", err)
 			}
+			log.Info("Successfully reflected remote tunnel information to the status of the custom resource")
+
 			// re-fetch Custom Resource to get the latest state of the resource on the cluster
 			if err := r.Get(ctx, req.NamespacedName, cftunnel); err != nil {
 				return fmt.Errorf("re-fetching 'CloudflareTunnel' custom resource: %w", err)
@@ -422,7 +433,29 @@ func (r *CloudflareTunnelReconciler) deleteTunnelStatus(ctx context.Context, cft
 }
 
 func (r *CloudflareTunnelReconciler) doFinalizerOperationsForCloudflareTunnel(ctx context.Context, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
-	// TODO: doFinalizerOperationsForCloudflareTunnel function
+	log := logf.FromContext(ctx)
+
+	r.Recorder.Event(
+		cftunnel, "Warning", "Deleting",
+		fmt.Sprintf("Custom Resource %s is being deleted from the namespace %s", cftunnel.Name, cftunnel.Namespace),
+	)
+
+	// remove ZeroTrust.Tunnels.Cloudflared
+	if r.TunnelReclaimPolicy == ReclaimPolicyDelete && cftunnel.Status.Tunnel != nil {
+		log.Info("deleting the remote tunnel", "tunnelID", cftunnel.Status.Tunnel.ID)
+		if err := r.TunnelClient.DeleteTunnel(ctx, cf.DeleteTunnelParams{
+			TunnelID: cftunnel.Status.Tunnel.ID,
+		}); err != nil {
+			return fmt.Errorf("deleting the remote tunnel '%s': %w", cftunnel.Status.Tunnel.ID, err)
+		}
+		log.Info("Successfully deleted the remote tunnel", "tunnelID", cftunnel.Status.Tunnel.ID, "reclaimPolicy", r.TunnelReclaimPolicy)
+
+		// No need to delete the tunnel status since the custom resource is deleted
+	}
+
+	// TODO: remove ZeroTrust.Access.Policies
+
+	// TODO: remove ZeroTrust.Access.Applications
 	return nil
 }
 
@@ -431,6 +464,7 @@ func (r *CloudflareTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cloudflaretunnelv1alpha1.CloudflareTunnel{}).
 		Named("cloudflaretunnel").
+		Owns(&corev1.Secret{}).
 		Complete(r)
 }
 
@@ -441,4 +475,22 @@ func generateRandomBytes(n int) ([]byte, error) {
 		return nil, err
 	}
 	return b, nil
+}
+
+type ReclaimPolicy string
+
+const (
+	ReclaimPolicyDelete ReclaimPolicy = "Delete"
+	ReclaimPolicyRetain ReclaimPolicy = "Retain"
+)
+
+func NewReclaimPolicy(value string) (ReclaimPolicy, error) {
+	switch strings.ToLower(value) {
+	case "delete":
+		return ReclaimPolicyDelete, nil
+	case "retain":
+		return ReclaimPolicyRetain, nil
+	default:
+		return "", fmt.Errorf("invalid 'ReclaimPolicy' value: %s", value)
+	}
 }

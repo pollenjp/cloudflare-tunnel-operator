@@ -33,7 +33,7 @@ type TunnelClient struct {
 	TunnelClientInterface
 
 	client    *cloudflare.Client
-	AccountID string
+	accountID string
 	// This prefix is automatically prepended to the tunnel name
 	// when creating, searching and deleting tunnels
 	// to avoid conflicts with other tunnels
@@ -51,7 +51,7 @@ func NewTunnelClient(params TunnelClientNewParams) *TunnelClient {
 		option.WithAPIToken(params.APIToken),
 	}
 	client := cloudflare.NewClient(opts...)
-	return &TunnelClient{client: client, AccountID: params.AccountID, tunnelNamePrefix: params.TunnelNamePrefix}
+	return &TunnelClient{client: client, accountID: params.AccountID, tunnelNamePrefix: params.TunnelNamePrefix}
 }
 
 func (t *TunnelClient) nameWithPrefix(name string) string {
@@ -87,7 +87,7 @@ func (t *TunnelClient) NewTunnel(ctx context.Context, params TunnelNewParams) (*
 	tunnel, err := t.client.ZeroTrust.Tunnels.Cloudflared.New(
 		ctx,
 		zero_trust.TunnelCloudflaredNewParams{
-			AccountID:    cloudflare.F(t.AccountID),
+			AccountID:    cloudflare.F(t.accountID),
 			Name:         cloudflare.F(name),
 			ConfigSrc:    cloudflare.F(zero_trust.TunnelCloudflaredNewParamsConfigSrcLocal),
 			TunnelSecret: cloudflare.F(params.TunnelSecret),
@@ -113,7 +113,7 @@ func (t *TunnelClient) FindTunnel(ctx context.Context, params FindTunnelParams) 
 	tunnels, err := t.client.ZeroTrust.Tunnels.Cloudflared.List(
 		ctx,
 		zero_trust.TunnelCloudflaredListParams{
-			AccountID: cloudflare.F(t.AccountID),
+			AccountID: cloudflare.F(t.accountID),
 			Name:      cloudflare.F(name),
 			IsDeleted: cloudflare.F(false),
 		},
@@ -142,12 +142,14 @@ type DeleteTunnelParams struct {
 	TunnelID string
 }
 
+// 'DeleteTunnel' is idempotent
 func (t *TunnelClient) DeleteTunnel(ctx context.Context, params DeleteTunnelParams) error {
+	// 'Delete' is idempotent
 	_, err := t.client.ZeroTrust.Tunnels.Cloudflared.Delete(
 		ctx,
 		params.TunnelID,
 		zero_trust.TunnelCloudflaredDeleteParams{
-			AccountID: cloudflare.F(t.AccountID),
+			AccountID: cloudflare.F(t.accountID),
 		},
 	)
 	if err != nil {
@@ -167,7 +169,7 @@ func (t *TunnelClient) GetTunnelToken(ctx context.Context, params GetTunnelToken
 		ctx,
 		params.TunnelID,
 		zero_trust.TunnelCloudflaredTokenGetParams{
-			AccountID: cloudflare.F(t.AccountID),
+			AccountID: cloudflare.F(t.accountID),
 		},
 	)
 	if err != nil {

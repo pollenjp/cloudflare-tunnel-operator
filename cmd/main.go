@@ -61,6 +61,10 @@ type Config struct {
 	APIToken  string `env:"CLOUDFLARE_API_TOKEN,required,notEmpty"`
 	// 'CFTO' is short for 'Cloudflare Tunnel Operator'
 	TunnelNamePrefix string `env:"TUNNEL_NAME_PREFIX" envDefault:"CFTO-"`
+	// When deleting a custom resource, what operation should be performed
+	// on the Tunnel in Cloudflare.
+	// Options: "delete", "retain"
+	TunnelReclaimPolicy string `env:"TUNNEL_RECLAIM_POLICY" envDefault:"Retain"`
 }
 
 // nolint:gocyclo
@@ -217,14 +221,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	tunnelReclaimPolicy, err := controller.NewReclaimPolicy(cfg.TunnelReclaimPolicy)
+	if err != nil {
+		setupLog.Error(err, "invalid 'TunnelReclaimPolicy' value", "value", cfg.TunnelReclaimPolicy)
+		os.Exit(1)
+	}
+
 	if err := (&controller.CloudflareTunnelReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("cloudflare-tunnel-controller"),
 		TunnelClient: cf.NewTunnelClient(cf.TunnelClientNewParams{
 			AccountID:        cfg.AccountID,
 			APIToken:         cfg.APIToken,
 			TunnelNamePrefix: cfg.TunnelNamePrefix,
 		}),
+		TunnelReclaimPolicy: tunnelReclaimPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CloudflareTunnel")
 		os.Exit(1)
