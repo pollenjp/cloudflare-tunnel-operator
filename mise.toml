@@ -27,18 +27,33 @@ run = 'ctlptl delete -f ./cluster.yaml'
 [tasks."up:tilt"]
 description = "Start Tilt"
 run = '''
+#!/usr/bin/env bash
+set -eux -o pipefail
+
 make manifests
 make generate
-
 tilt up
 '''
 depends = ["up:k8s"]
+
+[tasks.fmt]
+run = 'make fmt'
+
+[tasks.lint]
+run = 'make vet'
 
 [tasks.test]
 depends = ["test:*"]
 
 [tasks."test:e2e"]
-run = 'make cleanup-test-e2e && make test-e2e'
+depends = ["cleanup:e2e"]
+run = 'make test-e2e'
+
+[tasks."cleanup:e2e"]
+run = 'make cleanup-test-e2e'
 
 [tasks."test:local"]
 run = 'make test'
+
+[tasks."cleanup"]
+depends = ["cleanup:*"]
