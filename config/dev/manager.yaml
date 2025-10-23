@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        envFrom:
+        - configMapRef:
+            name: cloudflare-tunnel-operator-config-dev
+        - secretRef:
+            name: cloudflare-tunnel-operator-secret-dev

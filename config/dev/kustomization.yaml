@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cloudflare-tunnel-operator-system
+resources:
+- ../default
+patches:
+- path: manager.yaml
+configMapGenerator:
+  - name: cloudflare-tunnel-operator-config-dev
+    behavior: create
+    envs:
+    - .env.sample.txt # sample config file (can commit)
+secretGenerator:
+- name: cloudflare-tunnel-operator-secret-dev
+  behavior: create
+  envs:
+  - .env.sample.secret.txt # sample secret file (can commit)

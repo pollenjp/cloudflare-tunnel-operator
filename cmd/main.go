@@ -26,6 +26,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/caarlos0/env/v11"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -36,6 +37,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	cloudflaretunnelv1alpha1 "github.com/pollenjp/cloudflare-tunnel-operator/api/v1alpha1"
+	"github.com/pollenjp/cloudflare-tunnel-operator/internal/controller"
+	"github.com/pollenjp/cloudflare-tunnel-operator/pkg/cf"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -47,7 +52,19 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(cloudflaretunnelv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+type Config struct {
+	AccountID string `env:"CLOUDFLARE_ACCOUNT_ID,required,notEmpty"`
+	APIToken  string `env:"CLOUDFLARE_API_TOKEN,required,notEmpty"`
+	// 'CFTO' is short for 'Cloudflare Tunnel Operator'
+	TunnelNamePrefix string `env:"TUNNEL_NAME_PREFIX" envDefault:"CFTO-"`
+	// When deleting a custom resource, what operation should be performed
+	// on the Tunnel in Cloudflare.
+	// Options: "delete", "retain"
+	TunnelReclaimPolicy string `env:"TUNNEL_RECLAIM_POLICY" envDefault:"Retain"`
 }
 
 // nolint:gocyclo
@@ -84,6 +101,12 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	var cfg Config
+	if err := env.Parse(&cfg); err != nil {
+		setupLog.Error(err, "failed to parse config from environment variables")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -198,6 +221,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	tunnelReclaimPolicy, err := controller.NewReclaimPolicy(cfg.TunnelReclaimPolicy)
+	if err != nil {
+		setupLog.Error(err, "invalid 'TunnelReclaimPolicy' value", "value", cfg.TunnelReclaimPolicy)
+		os.Exit(1)
+	}
+
+	if err := (&controller.CloudflareTunnelReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("cloudflare-tunnel-controller"),
+		TunnelClient: cf.NewTunnelClient(cf.TunnelClientNewParams{
+			AccountID:        cfg.AccountID,
+			APIToken:         cfg.APIToken,
+			TunnelNamePrefix: cfg.TunnelNamePrefix,
+		}),
+		TunnelReclaimPolicy: tunnelReclaimPolicy,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "CloudflareTunnel")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

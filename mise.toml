@@ -1,7 +1,68 @@
 [tools]
+ctlptl = "0.8.43"
 direnv = "2.37.1"
 go = "1.25.2"
+kustomize = "5.7.1"
 operator-sdk = "1.41.1"
+tilt = "0.35.2"
+uv = "0.9.3"
 
-[tasks.debug]
+[tasks."debug:cloudflare"]
 run = 'go run cmd/cloudflare/main.go'
+
+[tasks.up]
+depends = ["up:k8s", "up:tilt"]
+
+[tasks.down]
+depends = ["down:k8s"]
+
+[tasks."up:k8s"]
+description = "Start local Kubernetes cluster"
+run = 'ctlptl apply -f ./cluster.yaml'
+
+[tasks."down:k8s"]
+description = "Stop local Kubernetes cluster"
+run = 'ctlptl delete -f ./cluster.yaml'
+
+[tasks."up:tilt"]
+description = "Start Tilt"
+run = '''
+#!/usr/bin/env bash
+set -eux -o pipefail
+
+make manifests
+make generate
+tilt up
+'''
+depends = ["up:k8s"]
+
+[tasks.fmt]
+run = 'make fmt && make lint-fix'
+
+[tasks.lint]
+depends = ["lint:*"]
+
+[tasks."lint:lint"]
+run = 'make lint'
+
+[tasks."lint:config"]
+run = 'make lint-config'
+
+[tasks."lint:vet"]
+run = 'make vet'
+
+[tasks.test]
+depends = ["test:*"]
+
+[tasks."test:e2e"]
+depends = ["cleanup:e2e"]
+run = 'make test-e2e'
+
+[tasks."cleanup:e2e"]
+run = 'make cleanup-test-e2e'
+
+[tasks."test:local"]
+run = 'make test'
+
+[tasks."cleanup"]
+depends = ["cleanup:*"]
