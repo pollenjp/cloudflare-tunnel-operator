@@ -18,13 +18,14 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
+	yamlGoYaml "go.yaml.in/yaml/v4"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,11 +34,15 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	appsv1apply "k8s.io/client-go/applyconfigurations/apps/v1"
 	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
+	metav1apply "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -47,7 +52,12 @@ import (
 
 const (
 	cftunnelFinalizer         = "cloudflare-tunnel.pollenjp.com/finalizer"
-	reconcilePeriodicInterval = 1 * time.Minute
+	reconcilePeriodicInterval = 5 * time.Minute
+	secretTunnelTokenKey      = "token"
+	credentialsFilePath       = "/etc/cloudflared/config/credentials.json"
+	cloudflaredConfigPath     = "/etc/cloudflared/config/config.yaml"
+	cloudflaredMetricsPort    = 2000
+	fieldManager              = "cloudflare-tunnel-operator"
 )
 
 const (
@@ -72,6 +82,8 @@ type CloudflareTunnelReconciler struct {
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cloudflare-tunnel.pollenjp.com,resources=cloudflaretunnels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
@@ -209,90 +221,78 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if errors.Is(err, ErrReconcileRequeue) {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("reconciling tunnel: %w", err)
 	}
 
-	// reconcile Secret for the tunnel token
-
-	log.Info("reconciling secret for the tunnel token", "name", cftunnel.Name)
+	// reconcile the secret for the tunnel token
 	if err := r.reconcileSecretForTunnelToken(ctx, req, cftunnel); err != nil {
+		if errors.Is(err, ErrReconcileRequeue) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("reconciling secret for the tunnel token: %w", err)
+	}
+
+	// reconcile config map for the cloudflared
+
+	log.Info("reconciling config map for the cloudflared", "name", cftunnel.Name)
+	if err := r.reconcileConfigMapForCloudflared(ctx, req, cftunnel); err != nil {
 		if errors.Is(err, ErrReconcileRequeue) {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	// TODO: reconcile deployment for the cloudflared agent
+	// reconcile deployment for the cloudflared agent
+	if err := r.reconcileDeploymentForCloudflared(ctx, req, cftunnel); err != nil {
+		if errors.Is(err, ErrReconcileRequeue) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{RequeueAfter: reconcilePeriodicInterval}, nil
 }
 
+// Reconcile the tunnel
 func (r *CloudflareTunnelReconciler) reconcileTunnel(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
 	log := logf.FromContext(ctx)
 
 	tunnel, err := r.getExistingTunnel(ctx, cftunnel)
-	if err == nil { // tunnel already exists
-		if cftunnel.Status.Tunnel == nil { // if tunnel status is not set, set it from the remote tunnel
-			log.Info("tunnel status is not set. setting it from the remote tunnel")
-
-			tunnelToken, err := r.TunnelClient.GetTunnelToken(ctx, cf.GetTunnelTokenParams{TunnelID: tunnel.ID})
-			if err != nil {
-				return fmt.Errorf("getting a tunnel token from the remote tunnel: %w", err)
+	if err != nil && errors.Is(err, ErrReconcileRequeue) {
+		return err
+	} else if err != nil && errors.Is(err, ErrGetExistingTunnelNotFound) {
+		// create a new tunnel
+	} else if err != nil {
+		return fmt.Errorf("getting an existing tunnel: %w", err)
+	} else {
+		// tunnel already exists
+		if cftunnel.Status.Tunnel == nil {
+			// if tunnel status is not set, set it from the remote tunnel
+			log.Info("remote tunnel exists but 'CloudflareTunnel' custom resource 'Status.Tunnel' is not set. updating it from the remote tunnel")
+			if err := r.updateTunnelStatus(ctx, req, cftunnel, tunnel); err != nil {
+				return fmt.Errorf("updating 'CloudflareTunnel' custom resource 'Status.Tunnel' from the remote tunnel: %w", err)
 			}
-
-			cftunnel.Status.Tunnel = &cloudflaretunnelv1alpha1.CloudflareTunnelStatusTunnel{
-				ID:    tunnel.ID,
-				Name:  tunnel.Name,
-				Token: *tunnelToken,
-			}
-			if err := r.Status().Update(ctx, cftunnel); err != nil {
-				return fmt.Errorf("updating 'CloudflareTunnel' custom resource 'Status.Tunnel': %w", err)
-			}
-			log.Info("Successfully reflected remote tunnel information to the status of the custom resource")
-
-			// re-fetch Custom Resource to get the latest state of the resource on the cluster
+			// re-fetching the Custom Resource to get the latest state of the resource on the cluster
 			if err := r.Get(ctx, req.NamespacedName, cftunnel); err != nil {
 				return fmt.Errorf("re-fetching 'CloudflareTunnel' custom resource: %w", err)
 			}
 		}
 		return nil
-	} else if !errors.Is(err, ErrGetExistingTunnelNotFound) {
-		return fmt.Errorf("unexpected: %w", err)
 	}
+
 	// ErrGetExistingTunnelNotFound
 	// -> create a new tunnel
 
 	log.Info("creating a new tunnel", "name", cftunnel.Name)
-
-	secretBytes, err := generateRandomBytes(100)
-	if err != nil {
-		return fmt.Errorf("generating random bytes for the tunnel secret: %w", err)
-	}
-
 	newTunnel, err := r.TunnelClient.NewTunnel(ctx, cf.TunnelNewParams{
-		Name:         cftunnel.Name,
-		TunnelSecret: base64.StdEncoding.EncodeToString(secretBytes),
+		Name: cftunnel.Name,
 	})
 	if err != nil {
 		return fmt.Errorf("creating a new tunnel: %w", err)
 	}
-	tunnelToken, err := r.TunnelClient.GetTunnelToken(ctx, cf.GetTunnelTokenParams{TunnelID: newTunnel.ID})
-	if err != nil {
-		return fmt.Errorf("getting a tunnel token: %w", err)
-	}
 
-	// set tunnel status
-	cftunnel.Status.Tunnel = &cloudflaretunnelv1alpha1.CloudflareTunnelStatusTunnel{
-		ID:    newTunnel.ID,
-		Name:  newTunnel.Name,
-		Token: *tunnelToken,
-	}
-	if err := r.Status().Update(ctx, cftunnel); err != nil {
-		return fmt.Errorf("updating 'CloudflareTunnel' custom resource 'Status.Tunnel': %w", err)
-	}
-	// re-fetch Custom Resource to get the latest state of the resource on the cluster
-	if err := r.Get(ctx, req.NamespacedName, cftunnel); err != nil {
-		return fmt.Errorf("re-fetching 'CloudflareTunnel' custom resource: %w", err)
+	if err := r.updateTunnelStatus(ctx, req, cftunnel, newTunnel); err != nil {
+		return fmt.Errorf("updating 'CloudflareTunnel' custom resource 'Status.Tunnel' from the new tunnel: %w", err)
 	}
 	return nil
 }
@@ -336,10 +336,26 @@ func (r *CloudflareTunnelReconciler) getExistingTunnel(ctx context.Context, cftu
 	return tunnel, nil
 }
 
+// Get the namespaced name for the config map that stores the cloudflared config
+func getConfigMapNamespacedNameForCloudflared(cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) types.NamespacedName {
+	return types.NamespacedName{
+		Name:      cftunnel.Name + "-cloudflared-config",
+		Namespace: cftunnel.Namespace,
+	}
+}
+
 // Get the namespaced name for the secret that stores the tunnel token
 func getSecretNamespacedNameForTunnelToken(cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) types.NamespacedName {
 	return types.NamespacedName{
 		Name:      cftunnel.Name + "-tunnel-token",
+		Namespace: cftunnel.Namespace,
+	}
+}
+
+// Get the namespaced name for the deployment that runs the cloudflared
+func getDeploymentNamespacedNameForCloudflared(cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) types.NamespacedName {
+	return types.NamespacedName{
+		Name:      cftunnel.Name + "-cloudflared",
 		Namespace: cftunnel.Namespace,
 	}
 }
@@ -353,22 +369,34 @@ func (r *CloudflareTunnelReconciler) reconcileSecretForTunnelToken(
 	log := logf.FromContext(ctx)
 	nsName := getSecretNamespacedNameForTunnelToken(cftunnel)
 
+	owner, err := controllerReference(cftunnel, r.Scheme)
+	if err != nil {
+		return fmt.Errorf("getting owner reference for the secret: %w", err)
+	}
+
 	ls := labelsForCloudflareTunnel()
 	ls["app.kubernetes.io/instance"] = nsName.Name
 
+	tunnelToken, err := r.TunnelClient.GetTunnelToken(ctx, cf.GetTunnelTokenParams{TunnelID: cftunnel.Status.Tunnel.ID})
+	if err != nil {
+		return fmt.Errorf("getting a tunnel token from the remote tunnel: %w", err)
+	}
+
 	secretApply := corev1apply.Secret(nsName.Name, nsName.Namespace).
 		WithLabels(ls).
+		WithOwnerReferences(owner).
 		WithData(map[string][]byte{
-			"token": []byte(cftunnel.Status.Tunnel.Token),
+			secretTunnelTokenKey: []byte(*tunnelToken),
 		})
+		// WithStringData(map[string]string{
+		// 	secretTunnelTokenKey: *tunnelToken,
+		// })
 
 	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(secretApply)
 	if err != nil {
-		return err
+		return fmt.Errorf("converting secret apply configuration to unstructured: %w", err)
 	}
-	patch := &unstructured.Unstructured{
-		Object: obj,
-	}
+	patch := &unstructured.Unstructured{Object: obj}
 
 	var current corev1.Secret
 	err = r.Get(ctx, nsName, &current)
@@ -376,14 +404,13 @@ func (r *CloudflareTunnelReconciler) reconcileSecretForTunnelToken(
 		return err
 	}
 
-	fieldManager := "cloudflare-tunnel-operator"
 	currApplyConfig, err := corev1apply.ExtractSecret(&current, fieldManager)
 	if err != nil {
-		return err
+		return fmt.Errorf("extracting current secret apply configuration: %w", err)
 	}
 
 	if equality.Semantic.DeepEqual(secretApply, currApplyConfig) {
-		// secret already exists and is up to date
+		log.Info("secret already exists and is up to date", "name", nsName.Name)
 		return nil
 	}
 
@@ -395,11 +422,236 @@ func (r *CloudflareTunnelReconciler) reconcileSecretForTunnelToken(
 		// https://kubernetes.io/docs/reference/using-api/server-side-apply/#using-server-side-apply-in-a-controller
 		Force: ptr.To(true),
 	}); err != nil {
-		log.Error(err, "unable to patch secret for the tunnel token")
-		return err
+		return fmt.Errorf("patching secret for the tunnel token: %w", err)
 	}
 
 	log.Info("reconcile secret successfully")
+	return nil
+}
+
+func (r *CloudflareTunnelReconciler) reconcileConfigMapForCloudflared(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
+	log := logf.FromContext(ctx)
+	nsName := getConfigMapNamespacedNameForCloudflared(cftunnel)
+
+	owner, err := controllerReference(cftunnel, r.Scheme)
+	if err != nil {
+		return fmt.Errorf("creating owner reference for the config map: %w", err)
+	}
+
+	ls := labelsForCloudflareTunnel()
+	ls["app.kubernetes.io/instance"] = nsName.Name
+
+	if cftunnel.Status.Tunnel == nil {
+		return fmt.Errorf("tunnel status is not set")
+	}
+
+	// TODO: specify from CRD Spec
+	cfdConfigYamlBytes, err := (func() ([]byte, error) {
+		cfdConfigJson := make(map[string]interface{})
+		if cftunnel.Spec.CloudflaredConfig != "" {
+			if err := yamlGoYaml.Unmarshal([]byte(cftunnel.Spec.CloudflaredConfig), &cfdConfigJson); err != nil {
+				return nil, fmt.Errorf("unmarshalling cloudflared config: %w", err)
+			}
+		}
+		cfdConfigJson["tunnel"] = cftunnel.Status.Tunnel.ID
+		if _, ok := cfdConfigJson["no-autoupdate"]; !ok {
+			cfdConfigJson["no-autoupdate"] = true
+		}
+		if _, ok := cfdConfigJson["metrics"]; !ok {
+			cfdConfigJson["metrics"] = fmt.Sprintf("0.0.0.0:%d", cloudflaredMetricsPort)
+		}
+
+		// type ingressType map[string]interface{}
+		// ingressArray, _ := cfdConfigJson["ingress"].([]ingressType)
+		// ingressArray = append(ingressArray, ingressType{
+		// 	// FIXME: remove later
+		// 	"hostname": "sample.pollenjp.com",
+		// 	"service":  "sample-service",
+		// })
+		// cfdConfigJson["ingress"] = ingressArray
+
+		yamlBytes, err := yamlGoYaml.Marshal(cfdConfigJson)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling cloudflared config: %w", err)
+		}
+		return yamlBytes, nil
+	})()
+	if err != nil {
+		return fmt.Errorf("embedding config into cloudflared config.yaml: %w", err)
+	}
+
+	configMapApply := corev1apply.ConfigMap(nsName.Name, nsName.Namespace).
+		WithLabels(ls).
+		WithOwnerReferences(owner).
+		WithData(map[string]string{
+			filepath.Base(cloudflaredConfigPath): string(cfdConfigYamlBytes),
+		})
+
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(configMapApply)
+	if err != nil {
+		return err
+	}
+	patch := &unstructured.Unstructured{
+		Object: obj,
+	}
+
+	var current corev1.ConfigMap
+	err = r.Get(ctx, nsName, &current)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	currApplyConfig, err := corev1apply.ExtractConfigMap(&current, fieldManager)
+	if err != nil {
+		return err
+	}
+
+	if equality.Semantic.DeepEqual(configMapApply, currApplyConfig) {
+		return nil
+	}
+
+	if err := r.Patch(ctx, patch, client.Apply, &client.PatchOptions{
+		FieldManager: fieldManager,
+		Force:        ptr.To(true),
+	}); err != nil {
+		log.Error(err, "unable to create or update config map for the cloudflared")
+		return err
+	}
+	log.Info("reconcile config map for the cloudflared successfully", "name", nsName.Name)
+	return nil
+}
+
+func (r *CloudflareTunnelReconciler) reconcileDeploymentForCloudflared(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
+	log := logf.FromContext(ctx)
+	nsName := getDeploymentNamespacedNameForCloudflared(cftunnel)
+
+	owner, err := controllerReference(cftunnel, r.Scheme)
+	if err != nil {
+		return fmt.Errorf("getting owner reference for the deployment: %w", err)
+	}
+
+	ls := labelsForCloudflareTunnel()
+	ls["app.kubernetes.io/instance"] = nsName.Name
+
+	// https://hub.docker.com/r/cloudflare/cloudflared/tags
+	// FIXME: specify in CR Spec
+	cloudflaredImage := "mirror.gcr.io/cloudflare/cloudflared:2025.8.1"
+
+	// https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/deployment-guides/kubernetes/
+	dep := appsv1apply.Deployment(nsName.Name, nsName.Namespace).
+		WithLabels(ls).
+		WithOwnerReferences(owner).
+		WithSpec(appsv1apply.DeploymentSpec().
+			WithReplicas(1). // FIXME: use resource spec
+			WithSelector(metav1apply.LabelSelector().WithMatchLabels(ls)).
+			WithTemplate(corev1apply.PodTemplateSpec().
+				WithLabels(ls).
+				WithSpec(corev1apply.PodSpec().
+					WithContainers(corev1apply.Container().
+						WithName("cloudflared").
+						WithImage(cloudflaredImage).
+						WithImagePullPolicy(corev1.PullAlways).
+						WithEnv(corev1apply.EnvVar().
+							WithName("TUNNEL_TOKEN").
+							WithValueFrom(corev1apply.EnvVarSource().
+								WithSecretKeyRef(corev1apply.SecretKeySelector().
+									WithName(getSecretNamespacedNameForTunnelToken(cftunnel).Name).
+									WithKey(secretTunnelTokenKey),
+								),
+							),
+						).
+						WithArgs(
+							"tunnel",
+							"--config",
+							cloudflaredConfigPath,
+							"run",
+						).
+						WithLivenessProbe(corev1apply.Probe().
+							WithHTTPGet(corev1apply.HTTPGetAction().
+								WithPath("/ready").
+								WithPort(intstr.FromInt(cloudflaredMetricsPort)),
+							).
+							WithFailureThreshold(20).
+							WithInitialDelaySeconds(5).
+							WithPeriodSeconds(10),
+						).
+						WithReadinessProbe(corev1apply.Probe().
+							WithHTTPGet(corev1apply.HTTPGetAction().
+								WithPath("/ready").
+								WithPort(intstr.FromInt(2000)),
+							).
+							WithSuccessThreshold(10).
+							WithInitialDelaySeconds(5).
+							WithPeriodSeconds(10),
+						).
+						WithVolumeMounts(
+							corev1apply.VolumeMount().
+								WithName("config").
+								WithMountPath(filepath.Dir(cloudflaredConfigPath)).
+								WithReadOnly(true),
+						),
+					).
+					WithVolumes(
+						corev1apply.Volume().
+							WithName("config").
+							WithConfigMap(corev1apply.ConfigMapVolumeSource().
+								WithName(getConfigMapNamespacedNameForCloudflared(cftunnel).Name).
+								WithItems(corev1apply.KeyToPath().
+									WithKey(filepath.Base(cloudflaredConfigPath)).
+									WithPath(filepath.Base(cloudflaredConfigPath)),
+								),
+							),
+					).
+					WithAffinity(corev1apply.Affinity().
+						WithPodAntiAffinity(corev1apply.PodAntiAffinity().
+							WithRequiredDuringSchedulingIgnoredDuringExecution(corev1apply.PodAffinityTerm().
+								WithLabelSelector(metav1apply.LabelSelector().WithMatchLabels(ls)).
+								WithTopologyKey("kubernetes.io/hostname"),
+							),
+						),
+					).
+					WithSecurityContext(corev1apply.PodSecurityContext().
+						WithSysctls(corev1apply.Sysctl().
+							WithName("net.ipv4.ping_group_range").
+							WithValue("65532 65532"),
+						),
+					),
+				),
+			),
+		)
+
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dep)
+	if err != nil {
+		return err
+	}
+	patch := &unstructured.Unstructured{
+		Object: obj,
+	}
+
+	var current appsv1.Deployment
+	err = r.Get(ctx, nsName, &current)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	fieldManager := "cloudflare-tunnel-operator"
+	currApplyConfig, err := appsv1apply.ExtractDeployment(&current, fieldManager)
+	if err != nil {
+		return err
+	}
+
+	if equality.Semantic.DeepEqual(dep, currApplyConfig) {
+		return nil
+	}
+
+	if err := r.Patch(ctx, patch, client.Apply, &client.PatchOptions{
+		FieldManager: fieldManager,
+		Force:        ptr.To(true),
+	}); err != nil {
+		log.Error(err, "unable to create or update deployment for the cloudflare agent")
+		return err
+	}
+	log.Info("reconcile deployment for the cloudflare agent successfully", "name", nsName.Name)
 	return nil
 }
 
@@ -411,6 +663,32 @@ func labelsForCloudflareTunnel() map[string]string {
 		// "app.kubernetes.io/version":    versionTag,
 		"app.kubernetes.io/managed-by": "CloudflareTunnelController",
 	}
+}
+
+// Update the tunnel status and re-fetch the Custom Resource to get the latest state of the resource on the cluster
+func (r *CloudflareTunnelReconciler) updateTunnelStatus(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel, tunnel *cf.Tunnel) error {
+	log := logf.FromContext(ctx)
+
+	cftunnel.Status.Tunnel = &cloudflaretunnelv1alpha1.CloudflareTunnelStatusTunnel{
+		ID:   tunnel.ID,
+		Name: tunnel.Name,
+	}
+
+	// reconcile the secret for the tunnel token
+	log.Info("reconciling secret for the tunnel token", "name", cftunnel.Name, "called from", "updateTunnelStatus()")
+	if err := r.reconcileSecretForTunnelToken(ctx, req, cftunnel); err != nil {
+		return fmt.Errorf("reconciling secret for the tunnel token: %w", err)
+	}
+
+	log.Info("updating 'CloudflareTunnel' custom resource 'Status.Tunnel'", "name", cftunnel.Name, "called from", "updateTunnelStatus()")
+	if err := r.Status().Update(ctx, cftunnel); err != nil {
+		return fmt.Errorf("updating 'CloudflareTunnel' custom resource 'Status.Tunnel': %w", err)
+	}
+	// re-fetch Custom Resource to get the latest state of the resource on the cluster
+	if err := r.Get(ctx, req.NamespacedName, cftunnel); err != nil {
+		return fmt.Errorf("re-fetching 'CloudflareTunnel' custom resource: %w", err)
+	}
+	return nil
 }
 
 // Delete Custom Resource Status.Tunnel
@@ -426,9 +704,22 @@ func (r *CloudflareTunnelReconciler) deleteTunnelStatus(ctx context.Context, cft
 
 	log.Info("deleting tunnel status")
 	cftunnel.Status.Tunnel = nil
+
+	// delete secret for the tunnel token
+	secretNamespacedName := getSecretNamespacedNameForTunnelToken(cftunnel)
+	if err := r.Delete(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretNamespacedName.Name,
+			Namespace: secretNamespacedName.Namespace,
+		},
+	}); err != nil {
+		return fmt.Errorf("deleting secret '%s': %w", secretNamespacedName.Name, err)
+	}
+
 	if err := r.Status().Update(ctx, cftunnel); err != nil {
 		return err
 	}
+	log.Info("successfully deleted tunnel status")
 	return nil
 }
 
@@ -459,24 +750,6 @@ func (r *CloudflareTunnelReconciler) doFinalizerOperationsForCloudflareTunnel(ct
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *CloudflareTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&cloudflaretunnelv1alpha1.CloudflareTunnel{}).
-		Named("cloudflaretunnel").
-		Owns(&corev1.Secret{}).
-		Complete(r)
-}
-
-func generateRandomBytes(n int) ([]byte, error) {
-	b := make([]byte, n)
-	_, err := rand.Read(b)
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
 type ReclaimPolicy string
 
 const (
@@ -493,4 +766,30 @@ func NewReclaimPolicy(value string) (ReclaimPolicy, error) {
 	default:
 		return "", fmt.Errorf("invalid 'ReclaimPolicy' value: %s", value)
 	}
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *CloudflareTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&cloudflaretunnelv1alpha1.CloudflareTunnel{}).
+		Named("cloudflaretunnel").
+		Owns(&corev1.Secret{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&appsv1.Deployment{}).
+		Complete(r)
+}
+
+func controllerReference(cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel, scheme *runtime.Scheme) (*metav1apply.OwnerReferenceApplyConfiguration, error) {
+	gvk, err := apiutil.GVKForObject(cftunnel, scheme)
+	if err != nil {
+		return nil, err
+	}
+	ref := metav1apply.OwnerReference().
+		WithAPIVersion(gvk.GroupVersion().String()).
+		WithKind(gvk.Kind).
+		WithName(cftunnel.Name).
+		WithUID(cftunnel.GetUID()).
+		WithBlockOwnerDeletion(true).
+		WithController(true)
+	return ref, nil
 }

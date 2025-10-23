@@ -145,7 +145,6 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 			Expect(updatedResource.Status.Tunnel).NotTo(BeNil())
 			Expect(updatedResource.Status.Tunnel.ID).To(Equal("tunnel-" + resourceName + "-id"))
 			Expect(updatedResource.Status.Tunnel.Name).To(Equal(resourceName))
-			Expect(updatedResource.Status.Tunnel.Token).To(Equal("token-tunnel-" + resourceName + "-id"))
 		})
 	})
 })

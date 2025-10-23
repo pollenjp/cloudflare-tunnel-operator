@@ -39,6 +39,11 @@ spec:
           spec:
             description: CloudflareTunnelSpec defines the desired state of CloudflareTunnel.
             properties:
+              cloudflared_config.yaml:
+                description: |-
+                  Cloudflared config.yaml file content.
+                  'tunnel' and 'credentials-file' fields are ignored because they are automatically injected by the operator.
+                type: string
               foo:
                 description: Foo is an example field of CloudflareTunnel. Edit cloudflaretunnel_types.go
                   to remove/update
@@ -112,15 +117,9 @@ spec:
                     type: string
                   name:
                     type: string
-                  token:
-                    description: |-
-                      Cloudflare Tunnel token encoded in base64
-                      that decoded format is `{"a": 'xxxx', "t": 'yyyy', "s": 'zzzz'}` json string
-                    type: string
                 required:
                 - id
                 - name
-                - token
                 type: object
             type: object
         type: object

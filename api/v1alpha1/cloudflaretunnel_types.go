@@ -30,6 +30,10 @@ type CloudflareTunnelSpec struct {
 
 	// Foo is an example field of CloudflareTunnel. Edit cloudflaretunnel_types.go to remove/update
 	Foo string `json:"foo,omitempty"`
+
+	// Cloudflared config.yaml file content.
+	// 'tunnel' and 'credentials-file' fields are ignored because they are automatically injected by the operator.
+	CloudflaredConfig string `json:"cloudflared_config.yaml,omitempty"`
 }
 
 type CloudflareTunnelStatusTunnel struct {
@@ -37,10 +41,6 @@ type CloudflareTunnelStatusTunnel struct {
 	ID string `json:"id"`
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	Name string `json:"name"`
-	// Cloudflare Tunnel token encoded in base64
-	// that decoded format is `{"a": 'xxxx', "t": 'yyyy', "s": 'zzzz'}` json string
-	// +operator-sdk:csv:customresourcedefinitions:type=status
-	Token string `json:"token"`
 }
 
 // CloudflareTunnelStatus defines the observed state of CloudflareTunnel.

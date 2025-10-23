@@ -7,3 +7,6 @@ metadata:
   name: cloudflaretunnel-sample
 spec:
   # TODO(user): Add fields here
+  # cloudflared_config.yaml: |
+  #   # metrics: <metrics-endpoint>
+  #   # no-autoupdate: <no-autoupdate>

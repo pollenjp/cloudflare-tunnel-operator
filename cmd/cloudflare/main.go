@@ -4,13 +4,16 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
+
+	// "encoding/base64"
 	"log"
 	"os"
 
-	"github.com/cloudflare/cloudflare-go/v6"
-	"github.com/cloudflare/cloudflare-go/v6/option"
-	"github.com/cloudflare/cloudflare-go/v6/zero_trust"
+	// "github.com/cloudflare/cloudflare-go/v6"
+	// "github.com/cloudflare/cloudflare-go/v6/zero_trust"
+	"github.com/pollenjp/cloudflare-tunnel-operator/pkg/cf"
+	yamlGoYaml "go.yaml.in/yaml/v4"
 )
 
 var (
@@ -42,87 +45,40 @@ func main() {
 
 	log.Println("start")
 
-	opts := []option.RequestOption{}
-
-	if o, ok := os.LookupEnv("CLOUDFLARE_API_TOKEN"); ok {
-		opts = append(opts, option.WithAPIToken(o))
-	} else {
+	apiToken, ok := os.LookupEnv("CLOUDFLARE_API_TOKEN")
+	if !ok {
 		log.Fatal("CLOUDFLARE_API_TOKEN is not set")
 	}
 
-	client := cloudflare.NewClient(opts...)
+	zeroTrustTunnelName := "cloudflaretunnel-sample"
+	tunnelClient := cf.NewTunnelClient(cf.TunnelClientNewParams{
+		AccountID: ACCOUNT_ID,
+		APIToken:  apiToken,
+		// TunnelNamePrefix: "SAMPLE-",
+		TunnelNamePrefix: "CFTO-",
+	})
 	log.Println("succeeded to create client")
 
 	// cloudflared
-	// TODO: create a cloudflared tunnel
+	// create a cloudflared tunnel
 
-	zeroTrustTunnelName := "sample-zero-trust-tunnel"
-	zeroTrustTunnelId := ""
-
-	page, err := client.ZeroTrust.Tunnels.Cloudflared.List(
-		ctx,
-		zero_trust.TunnelCloudflaredListParams{
-			AccountID: cloudflare.F(ACCOUNT_ID),
-			Name:      cloudflare.F(zeroTrustTunnelName),
-			IsDeleted: cloudflare.F(false),
-		},
-	)
-	if err != nil {
+	log.Println("search existing tunnels ----------------------------------------")
+	tunnel, err := tunnelClient.FindTunnel(ctx, cf.FindTunnelParams{
+		Name: zeroTrustTunnelName,
+	})
+	if err != nil && errors.Is(err, cf.ErrFindTunnelNotFound) {
+		log.Println("tunnel not found")
+		tunnel = nil
+	} else if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("succeeded to get tunnels")
-	for _, tunnel := range page.Result {
-		isHealthy := tunnel.Status == "healthy"
-		log.Println("tunnel: ", tunnel.ID, "name: ", tunnel.Name, "status: ", tunnel.Status, "healthy: ", isHealthy, "deletedAt: ", tunnel.DeletedAt)
-		if tunnel.Name == zeroTrustTunnelName {
-			zeroTrustTunnelId = tunnel.ID
-			log.Println("zero trust tunnel already exists")
-
-			// start
-			// {
-			// 	delRes, err := client.ZeroTrust.Tunnels.Cloudflared.Delete(
-			// 		ctx,
-			// 		tunnel.ID,
-			// 		zero_trust.TunnelCloudflaredDeleteParams{
-			// 			AccountID: cloudflare.F(ACCOUNT_ID),
-			// 		},
-			// 	)
-			// 	if err != nil {
-			// 		log.Fatal(err)
-			// 	}
-			// 	log.Println("succeeded to delete unhealthy tunnel, deleted at: ", delRes.DeletedAt)
-			// }
-			// end
-
-			continue
-		}
-	}
-
-	if zeroTrustTunnelId == "" {
-		tunnelSecret, ok := os.LookupEnv("CLOUDFLARE_ZERO_TRUST_TUNNEL_SECRET")
-		if !ok {
-			log.Fatal("CLOUDFLARE_ZERO_TRUST_TUNNEL_SECRET is not set")
-		}
-
-		newTunnel, err := client.ZeroTrust.Tunnels.Cloudflared.New(
-			ctx,
-			zero_trust.TunnelCloudflaredNewParams{
-				AccountID:    cloudflare.F(ACCOUNT_ID),
-				Name:         cloudflare.F(zeroTrustTunnelName),
-				ConfigSrc:    cloudflare.F(zero_trust.TunnelCloudflaredNewParamsConfigSrcLocal),
-				TunnelSecret: cloudflare.F(base64.StdEncoding.EncodeToString([]byte(tunnelSecret))),
-			},
-		)
-		if err != nil {
-			log.Fatal(err)
-		}
-		zeroTrustTunnelId = newTunnel.ID
-		log.Println("succeeded to create tunnel")
-		log.Println("tunnel: ", newTunnel.ID, "name: ", newTunnel.Name)
+	if tunnel != nil {
+		log.Println("tunnel: ", tunnel.ID, "name: ", tunnel.Name)
 	}
 
 	// if zeroTrustTunnelId != "" {
-	//	// 'Delete' is idempotent
+	// 	log.Println("delete tunnel ----------------------------------------")
+	// 	// 'Delete' is idempotent
 	// 	deleteRes, err := client.ZeroTrust.Tunnels.Cloudflared.Delete(
 	// 		ctx,
 	// 		zeroTrustTunnelId,
@@ -135,11 +91,73 @@ func main() {
 	// 	}
 	// 	log.Println("succeeded to delete tunnel")
 	// 	log.Println("tunnel: ", deleteRes.ID, "name: ", deleteRes.Name, "deletedAt: ", deleteRes.DeletedAt)
+
+	// 	zeroTrustTunnelId = "" // reset
 	// }
 
-	log.Println("Finally, Zero Trust Tunnel is created. tunnel: ", zeroTrustTunnelId, "name: ", zeroTrustTunnelName)
+	if tunnel == nil {
+		log.Println("create new tunnel ----------------------------------------")
+		// tunnelSecret, ok := os.LookupEnv("CLOUDFLARE_ZERO_TRUST_TUNNEL_SECRET")
+		// if !ok {
+		// 	log.Fatal("CLOUDFLARE_ZERO_TRUST_TUNNEL_SECRET is not set")
+		// }
 
-	// get token for the tunnel
+		newTunnel, err := tunnelClient.NewTunnel(ctx, cf.TunnelNewParams{
+			Name: zeroTrustTunnelName,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		tunnel = newTunnel
+
+		log.Println("Zero Trust Tunnel is newly created. tunnel: ", tunnel.ID, "name: ", tunnel.Name)
+	}
+
+	// get token
+	{
+		tunnelToken, err := tunnelClient.GetTunnelToken(ctx, cf.GetTunnelTokenParams{
+			TunnelID: tunnel.ID,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("tunnel token: ", *tunnelToken)
+	}
+
+	log.Println("get current tunnel configuration ----------------------------------------")
+
+	{
+		tunnelConfig, err := tunnelClient.GetTunnelConfiguration(ctx, cf.GetTunnelConfigurationParams{
+			TunnelID: tunnel.ID,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// marshal to yaml
+		yamlBytes, err := yamlGoYaml.Marshal(tunnelConfig)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("tunnel configuration: ", string(yamlBytes))
+	}
+
+	// update
+
+	// {
+	// 	if err := tunnelClient.UpdateIngressConfig(ctx, cf.UpdateIngressConfigParams{
+	// 		TunnelID: tunnel.ID,
+	// 		Ingress: []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	// 			{
+	// 				Hostname: cloudflare.F("sample3.pollenjp.com"),
+	// 				Service:  cloudflare.F("http://localhost:8080"),
+	// 			},
+	// 		},
+	// 	}); err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	log.Println("succeeded to update ingress configuration")
+	// }
 
 	// tunnelToken, err := client.ZeroTrust.Tunnels.Cloudflared.Token.Get(
 	// 	ctx,
