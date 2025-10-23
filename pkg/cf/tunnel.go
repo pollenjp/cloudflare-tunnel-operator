@@ -614,13 +614,14 @@ func (t *TunnelClient) UpdateIngressConfig(ctx context.Context, params UpdateIng
 	//   "errors":[
 	//     {
 	//       "code":1056,
-	//       "message":"Bad Configuration: Validation failed: The last ingress rule must match all URLs (i.e. it should not have a hostname or path filter)\n"}
+	//       "message":"Bad Configuration: Validation failed: The last ingress
+	//                  rule must match all URLs (i.e. it should not have a hostname or path filter)\n"}
 	//   ],
 	//   "messages":[],
 	//   "result":null
 	// }
 	// ```
-	if len(ingress) == 0 || !(ingress[len(ingress)-1].Hostname.Value == "" && ingress[len(ingress)-1].Path.Value == "") {
+	if len(ingress) == 0 || ingress[len(ingress)-1].Hostname.Value != "" || ingress[len(ingress)-1].Path.Value != "" {
 		ingress = append(ingress, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 			Service: cloudflare.F("http_status:404"),
 		})

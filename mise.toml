@@ -37,9 +37,18 @@ tilt up
 depends = ["up:k8s"]
 
 [tasks.fmt]
-run = 'make fmt'
+run = 'make fmt && make lint-fix'
 
 [tasks.lint]
+depends = ["lint:*"]
+
+[tasks."lint:lint"]
+run = 'make lint'
+
+[tasks."lint:config"]
+run = 'make lint-config'
+
+[tasks."lint:vet"]
 run = 'make vet'
 
 [tasks.test]

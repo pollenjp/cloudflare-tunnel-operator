@@ -363,7 +363,7 @@ func getDeploymentNamespacedNameForCloudflared(cftunnel *cloudflaretunnelv1alpha
 // Reconcile the secret that stores the tunnel token
 func (r *CloudflareTunnelReconciler) reconcileSecretForTunnelToken(
 	ctx context.Context,
-	req ctrl.Request,
+	_ ctrl.Request,
 	cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel,
 ) error {
 	log := logf.FromContext(ctx)
@@ -429,7 +429,7 @@ func (r *CloudflareTunnelReconciler) reconcileSecretForTunnelToken(
 	return nil
 }
 
-func (r *CloudflareTunnelReconciler) reconcileConfigMapForCloudflared(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
+func (r *CloudflareTunnelReconciler) reconcileConfigMapForCloudflared(ctx context.Context, _ ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
 	log := logf.FromContext(ctx)
 	nsName := getConfigMapNamespacedNameForCloudflared(cftunnel)
 
@@ -521,7 +521,7 @@ func (r *CloudflareTunnelReconciler) reconcileConfigMapForCloudflared(ctx contex
 	return nil
 }
 
-func (r *CloudflareTunnelReconciler) reconcileDeploymentForCloudflared(ctx context.Context, req ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
+func (r *CloudflareTunnelReconciler) reconcileDeploymentForCloudflared(ctx context.Context, _ ctrl.Request, cftunnel *cloudflaretunnelv1alpha1.CloudflareTunnel) error {
 	log := logf.FromContext(ctx)
 	nsName := getDeploymentNamespacedNameForCloudflared(cftunnel)
 
